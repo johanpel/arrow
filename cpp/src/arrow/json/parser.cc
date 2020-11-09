@@ -24,13 +24,10 @@
 #include <utility>
 #include <vector>
 
-#include "arrow/json/rapidjson_defs.h"
-#include "rapidjson/error/en.h"
-#include "rapidjson/reader.h"
-
 #include "arrow/array.h"
 #include "arrow/buffer_builder.h"
 #include "arrow/builder.h"
+#include "arrow/json/rapidjson_defs.h"
 #include "arrow/memory_pool.h"
 #include "arrow/type.h"
 #include "arrow/util/bitset_stack.h"
@@ -39,6 +36,8 @@
 #include "arrow/util/string_view.h"
 #include "arrow/util/trie.h"
 #include "arrow/visitor_inline.h"
+#include "rapidjson/error/en.h"
+#include "rapidjson/reader.h"
 
 namespace arrow {
 namespace json {
@@ -106,6 +105,7 @@ Status Kind::ForType(const DataType& type, Kind::type* kind) {
       return Kind::ForType(*dict_type.value_type(), kind_);
     }
     Status Visit(const ListType&) { return SetKind(Kind::kArray); }
+    Status Visit(const FixedSizeListType&) { return SetKind(Kind::kArray); }
     Status Visit(const StructType&) { return SetKind(Kind::kObject); }
     Status Visit(const DataType& not_impl) {
       return Status::NotImplemented("JSON parsing of ", not_impl);
