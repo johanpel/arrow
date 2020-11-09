@@ -15,15 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include "arrow/json/reader.h"
+
+#include <gtest/gtest.h>
+
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <gtest/gtest.h>
-
 #include "arrow/io/interfaces.h"
 #include "arrow/json/options.h"
-#include "arrow/json/reader.h"
 #include "arrow/json/test_common.h"
 #include "arrow/table.h"
 #include "arrow/testing/gtest_util.h"
@@ -282,6 +283,101 @@ TEST(ReaderTest, ListArrayWithFewValues) {
 
   ASSERT_OK_AND_ASSIGN(auto actual_table, reader->Read());
   AssertTablesEqual(*actual_table, *expected_table);
+}
+
+TEST(ReaderTest, FixedSizeList) {
+  constexpr int32_t NUM_VALS = 3;
+  auto fsl_type = fixed_size_list(int64(), NUM_VALS);
+  auto s = schema({field("a", fsl_type)});
+  ParseOptions parse_options;
+  parse_options.unexpected_field_behavior = UnexpectedFieldBehavior::InferType;
+  parse_options.explicit_schema = s;
+  ReadOptions read_options;
+  read_options.block_size = 15;
+  read_options.use_threads = false;
+
+  auto value_builder1 = std::make_shared<Int64Builder>();
+  auto list_builder1 = std::make_shared<FixedSizeListBuilder>(
+      default_memory_pool(), std::make_shared<Int64Builder>(), NUM_VALS);
+  auto value_builder2 = std::make_shared<Int64Builder>();
+  auto list_builder2 = std::make_shared<FixedSizeListBuilder>(default_memory_pool(),
+                                                              value_builder2, NUM_VALS);
+
+  ASSERT_OK(list_builder1->Append());
+  ASSERT_OK(value_builder1->AppendValues({1, 2, 3}));
+  ASSERT_OK(list_builder2->Append());
+  ASSERT_OK(value_builder2->AppendValues({4, 5, 6}));
+
+  std::shared_ptr<Array> array1;
+  ASSERT_OK(list_builder1->Finish(&array1));
+  std::shared_ptr<Array> array2;
+  ASSERT_OK(list_builder2->Finish(&array2));
+
+  auto eb1 = RecordBatch::Make(s, 1, {array1});
+  auto eb2 = RecordBatch::Make(s, 1, {array2});
+
+  auto e_chunked_table = arrow::Table::FromRecordBatches({eb1, eb2}).ValueOrDie();
+  auto e_combined_table = e_chunked_table->CombineChunks().ValueOrDie();
+  auto e_table_reader = arrow::TableBatchReader(*e_combined_table);
+  auto expected_batch = e_table_reader.Next().ValueOrDie();
+
+  std::shared_ptr<io::InputStream> input1;
+  std::shared_ptr<io::InputStream> input2;
+
+  std::string json1 = R"({"a": [1,2,3,4,5,6,7,8,9,10,11,12]})";
+  std::string json2 = R"({"a": [13,14,15,16,17,18,19,20,21,22,23,24]})";
+
+  auto buf1 = arrow::Buffer::Wrap(json1.data(), json1.length());
+  auto buf2 = arrow::Buffer::Wrap(json2.data(), json2.length());
+
+  auto ab1 = ParseOne(parse_options, buf1).ValueOrDie();
+  auto ab2 = ParseOne(parse_options, buf2).ValueOrDie();
+
+  auto a_chunked_table = arrow::Table::FromRecordBatches({ab1, ab2}).ValueOrDie();
+  auto a_combined_table = a_chunked_table->CombineChunks().ValueOrDie();
+  auto a_table_reader = arrow::TableBatchReader(*a_combined_table);
+  auto actual_batch = a_table_reader.Next().ValueOrDie();
+
+  std::cout << "Expected:" << std::endl << expected_batch->ToString();
+  std::cout << "Actual:" << std::endl << actual_batch->ToString();
+
+  // AssertTablesEqual(*expected_table, *actual_table, false);
+}
+
+TEST(ReaderTest, List) {
+  auto list_type = list(int64());
+  auto s = schema({field("a", list_type)});
+  ParseOptions parse_options;
+  parse_options.unexpected_field_behavior = UnexpectedFieldBehavior::InferType;
+  parse_options.explicit_schema = s;
+  ReadOptions read_options;
+
+  auto values_builder = std::make_shared<Int64Builder>();
+  auto list_builder =
+      std::make_shared<ListBuilder>(default_memory_pool(), values_builder);
+
+  ASSERT_OK(list_builder->Append());
+  ASSERT_OK(values_builder->AppendValues({1, 2, 3}));
+  ASSERT_OK(list_builder->Append());
+  ASSERT_OK(values_builder->AppendValues({4, 5, 6, 7}));
+
+  std::shared_ptr<Array> array;
+  ASSERT_OK(list_builder->Finish(&array));
+  auto batch = RecordBatch::Make(s, 2, {array});
+  auto expected_table = Table::FromRecordBatches({batch}).ValueOrDie();
+
+  std::string json = R"({"a": [1, 2, 3]}
+{"a": [4, 5, 6, 7]}
+)";
+  std::shared_ptr<io::InputStream> input;
+  ASSERT_OK(MakeStream(json, &input));
+
+  read_options.use_threads = false;
+  ASSERT_OK_AND_ASSIGN(auto reader, TableReader::Make(default_memory_pool(), input,
+                                                      read_options, parse_options));
+
+  ASSERT_OK_AND_ASSIGN(auto actual_table, reader->Read());
+  AssertTablesEqual(*expected_table, *actual_table, false);
 }
 
 }  // namespace json
