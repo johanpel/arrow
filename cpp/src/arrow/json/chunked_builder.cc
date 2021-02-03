@@ -263,6 +263,90 @@ class ChunkedListArrayBuilder : public ChunkedArrayBuilder {
   std::shared_ptr<Field> value_field_;
 };
 
+class ChunkedFixedSizeListArrayBuilder : public ChunkedArrayBuilder {
+ public:
+  ChunkedFixedSizeListArrayBuilder(const std::shared_ptr<TaskGroup>& task_group,
+                                   MemoryPool* pool,
+                                   std::shared_ptr<ChunkedArrayBuilder> value_builder,
+                                   const std::shared_ptr<Field>& value_field,
+                                   const int32_t list_size)
+      : ChunkedArrayBuilder(task_group),
+        pool_(pool),
+        value_builder_(std::move(value_builder)),
+        value_field_(value_field),
+        list_size_(list_size) {}
+
+  Status ReplaceTaskGroup(const std::shared_ptr<TaskGroup>& task_group) override {
+    RETURN_NOT_OK(task_group_->Finish());
+    RETURN_NOT_OK(value_builder_->ReplaceTaskGroup(task_group));
+    task_group_ = task_group;
+    return Status::OK();
+  }
+
+  void Insert(int64_t block_index, const std::shared_ptr<Field>&,
+              const std::shared_ptr<Array>& unconverted) override {
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    auto list_array = static_cast<const ListArray*>(unconverted.get());
+    // Values length must be integer multiple of the list_size_ in order to convert
+    // correctly?
+    DCHECK_EQ(list_array->values()->length() % list_size_, 0);
+
+    if (null_bitmap_chunks_.size() <= static_cast<size_t>(block_index)) {
+      null_bitmap_chunks_.resize(static_cast<size_t>(block_index) + 1, nullptr);
+    }
+    null_bitmap_chunks_[block_index] = unconverted->null_bitmap();
+
+    if (unconverted->type_id() == Type::NA) {
+      auto st = InsertNull(block_index, unconverted->length());
+      if (!st.ok()) {
+        task_group_->Append([st] { return st; });
+      }
+      return;
+    }
+
+    DCHECK_EQ(unconverted->type_id(), Type::LIST);
+    value_builder_->Insert(block_index, list_array->list_type()->value_field(),
+                           list_array->values());
+  }
+
+  Status Finish(std::shared_ptr<ChunkedArray>* out) override {
+    RETURN_NOT_OK(task_group_->Finish());
+
+    std::shared_ptr<ChunkedArray> value_array;
+    RETURN_NOT_OK(value_builder_->Finish(&value_array));
+
+    auto type = fixed_size_list(
+        value_field_->WithType(value_array->type())->WithMetadata(nullptr), list_size_);
+    ArrayVector chunks(null_bitmap_chunks_.size());
+    for (size_t i = 0; i < null_bitmap_chunks_.size(); ++i) {
+      auto value_chunk = value_array->chunk(static_cast<int>(i));
+      auto length = value_chunk->length() / list_size_;
+      chunks[i] = std::make_shared<FixedSizeListArray>(type, length, value_chunk,
+                                                       null_bitmap_chunks_[i]);
+    }
+
+    *out = std::make_shared<ChunkedArray>(std::move(chunks), type);
+    return Status::OK();
+  }
+
+ private:
+  // call from Insert() only, with mutex_ locked
+  Status InsertNull(int64_t block_index, int64_t length) {
+    value_builder_->Insert(block_index, value_field_, std::make_shared<NullArray>(0));
+    ARROW_ASSIGN_OR_RAISE(null_bitmap_chunks_[block_index],
+                          AllocateEmptyBitmap(length, pool_));
+    return Status::OK();
+  }
+
+  std::mutex mutex_;
+  MemoryPool* pool_;
+  std::shared_ptr<ChunkedArrayBuilder> value_builder_;
+  BufferVector null_bitmap_chunks_;
+  std::shared_ptr<Field> value_field_;
+  int32_t list_size_;
+};
+
 class ChunkedStructArrayBuilder : public ChunkedArrayBuilder {
  public:
   ChunkedStructArrayBuilder(
@@ -450,6 +534,17 @@ Status MakeChunkedArrayBuilder(const std::shared_ptr<TaskGroup>& task_group,
                                           list_type->value_type(), &value_builder));
     *out = std::make_shared<ChunkedListArrayBuilder>(
         task_group, pool, std::move(value_builder), list_type->value_field());
+    return Status::OK();
+  }
+  if (type->id() == Type::FIXED_SIZE_LIST) {
+    auto fixed_size_list_type = static_cast<const FixedSizeListType*>(type.get());
+    std::shared_ptr<ChunkedArrayBuilder> value_builder;
+    RETURN_NOT_OK(MakeChunkedArrayBuilder(task_group, pool, promotion_graph,
+                                          fixed_size_list_type->value_type(),
+                                          &value_builder));
+    *out = std::make_shared<ChunkedFixedSizeListArrayBuilder>(
+        task_group, pool, std::move(value_builder), fixed_size_list_type->value_field(),
+        fixed_size_list_type->list_size());
     return Status::OK();
   }
   std::shared_ptr<Converter> converter;
