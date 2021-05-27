@@ -105,6 +105,7 @@ Status Kind::ForType(const DataType& type, Kind::type* kind) {
       return Kind::ForType(*dict_type.value_type(), kind_);
     }
     Status Visit(const ListType&) { return SetKind(Kind::kArray); }
+    Status Visit(const FixedSizeListType&) { return SetKind(Kind::kArray); }
     Status Visit(const StructType&) { return SetKind(Kind::kObject); }
     Status Visit(const DataType& not_impl) {
       return Status::NotImplemented("JSON parsing of ", not_impl);
