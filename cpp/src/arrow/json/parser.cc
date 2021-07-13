@@ -682,7 +682,7 @@ class HandlerBase : public BlockParser,
 
     rj::Reader reader;
 
-    for (; num_rows_ < kMaxParserNumRows; ++num_rows_) {
+    while(true) {  
       auto ok = reader.Parse<parse_flags>(json, handler);
       switch (ok.Code()) {
         case rj::kParseErrorNone:
@@ -699,7 +699,6 @@ class HandlerBase : public BlockParser,
           return ParseError(rj::GetParseError_En(ok.Code()), " in row ", num_rows_);
       }
     }
-    return Status::Invalid("Exceeded maximum rows");
   }
 
   template <typename Handler>
