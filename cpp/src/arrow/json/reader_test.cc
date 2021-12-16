@@ -274,5 +274,31 @@ TEST(ReaderTest, ListArrayWithFewValues) {
   AssertTablesEqual(*actual_table, *expected_table);
 }
 
+TEST_P(ReaderTest, FixedSizeListArray) {
+  // ARROW-11335
+  auto schema = ::arrow::schema(
+      {field("two_ints", fixed_size_list(uint64(), 2)),
+       field("three_strings", fixed_size_list(utf8(), 3)),
+       field("two_nested_ints", fixed_size_list(fixed_size_list(uint8(), 2), 2))});
+  parse_options_.explicit_schema = schema;
+  parse_options_.unexpected_field_behavior = UnexpectedFieldBehavior::Error;
+  auto src =
+      R"({"two_ints": [1, 2], "three_strings": ["", "abc", null], "two_nested_ints": [[1,2], [255,254]]}
+{"two_ints": [1337, 42], "three_strings": ["xyz", "123", "dolphins"], "two_nested_ints": [null, [1,3]]}
+)";
+  SetUpReader(src);
+  ASSERT_OK_AND_ASSIGN(table_, reader_->Read());
+
+  auto expected_table = Table::Make(
+      schema, {
+                  ArrayFromJSON(schema->field(0)->type(), R"([[1,2],[1337,42]])"),
+                  ArrayFromJSON(schema->field(1)->type(),
+                                R"([["", "abc", null],["xyz", "123", "dolphins"]])"),
+                  ArrayFromJSON(schema->field(2)->type(),
+                                R"([[[1,2],[255,254]],[null,[1,3]]])"),
+              });
+  AssertTablesEqual(*expected_table, *table_);
+}
+
 }  // namespace json
 }  // namespace arrow

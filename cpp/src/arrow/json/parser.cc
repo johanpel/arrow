@@ -109,6 +109,7 @@ Status Kind::ForType(const DataType& type, Kind::type* kind) {
       return Kind::ForType(*dict_type.value_type(), kind_);
     }
     Status Visit(const ListType&) { return SetKind(Kind::kArray); }
+    Status Visit(const FixedSizeListType&) { return SetKind(Kind::kArray); }
     Status Visit(const StructType&) { return SetKind(Kind::kObject); }
     Status Visit(const DataType& not_impl) {
       return Status::NotImplemented("JSON parsing of ", not_impl);
@@ -433,8 +434,8 @@ class RawBuilderSet {
         return MakeBuilder<Kind::kString>(leading_nulls, builder);
 
       case Kind::kArray: {
+        const auto& list_type = checked_cast<const BaseListType&>(t);
         RETURN_NOT_OK(MakeBuilder<Kind::kArray>(leading_nulls, builder));
-        const auto& list_type = checked_cast<const ListType&>(t);
 
         BuilderPtr value_builder;
         RETURN_NOT_OK(MakeBuilder(*list_type.value_type(), 0, &value_builder));
